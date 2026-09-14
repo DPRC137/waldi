@@ -1,6 +1,7 @@
 package web
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"net/http"
 	"waldi/internal/store"
@@ -122,8 +123,9 @@ type exportPost struct {
 	CreatedAt   string  `json:"created_at"`
 }
 
-// handleExportPosts streams every post a user has written as a single JSON
-// download, so writers can always take their words with them.
+// handleExportPosts streams every post a user has written as a zip archive
+// containing a posts.json dump and individual HTML files, so writers can
+// always take their words with them.
 func (s *Server) handleExportPosts(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	if user == nil {
@@ -164,11 +166,58 @@ func (s *Server) handleExportPosts(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+user.Username+`-posts.json"`)
-	enc := json.NewEncoder(w)
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+user.Username+`-export.zip"`)
+
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	// Write posts.json
+	jsonF, err := zw.Create("posts.json")
+	if err != nil {
+		s.logger.Error("creating posts.json in zip", "err", err)
+		return
+	}
+	enc := json.NewEncoder(jsonF)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(out); err != nil {
-		s.logger.Error("writing export", "err", err)
+		s.logger.Error("writing json to zip", "err", err)
+		return
+	}
+
+	// Write individual HTML files
+	for _, p := range out {
+		name := p.Slug + ".html"
+		if p.PublishedAt != nil {
+			// Prefix with YYYY-MM-DD
+			if len(*p.PublishedAt) >= 10 {
+				name = (*p.PublishedAt)[:10] + "-" + name
+			}
+		} else {
+			name = "draft-" + name
+		}
+
+		htmlF, err := zw.Create("posts/" + name)
+		if err != nil {
+			s.logger.Error("creating html file in zip", "err", err)
+			continue
+		}
+
+		// Write a simple HTML wrapper
+		htmlContent := `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>` + p.Title + `</title>
+</head>
+<body>
+<h1>` + p.Title + `</h1>
+` + p.HTML + `
+</body>
+</html>`
+		
+		if _, err := htmlF.Write([]byte(htmlContent)); err != nil {
+			s.logger.Error("writing html to zip", "err", err)
+		}
 	}
 }
