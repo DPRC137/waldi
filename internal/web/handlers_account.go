@@ -3,7 +3,9 @@ package web
 import (
 	"archive/zip"
 	"encoding/json"
+	"html/template"
 	"net/http"
+	"waldi/internal/i18n"
 	"waldi/internal/store"
 )
 
@@ -123,6 +125,26 @@ type exportPost struct {
 	CreatedAt   string  `json:"created_at"`
 }
 
+type exportPostPage struct {
+	Lang  string
+	Dir   string
+	Title string
+	HTML  template.HTML
+}
+
+var exportPostTemplate = template.Must(template.New("post").Parse(`<!DOCTYPE html>
+<html lang="{{.Lang}}" dir="{{.Dir}}">
+<head>
+<meta charset="utf-8">
+<title>{{.Title}}</title>
+</head>
+<body>
+<h1>{{.Title}}</h1>
+{{.HTML}}
+</body>
+</html>
+`))
+
 // handleExportPosts streams every post a user has written as a zip archive
 // containing a posts.json dump and individual HTML files, so writers can
 // always take their words with them.
@@ -176,7 +198,6 @@ func (s *Server) handleExportPosts(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Write posts.json
 	jsonF, err := zw.Create("posts.json")
 	if err != nil {
 		s.logger.Error("creating posts.json in zip", "err", err)
@@ -189,16 +210,10 @@ func (s *Server) handleExportPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write individual HTML files
-	for _, p := range out {
-		name := p.Slug + ".html"
+	for i, p := range posts {
+		name := "draft-" + p.Slug + ".html"
 		if p.PublishedAt != nil {
-			// Prefix with YYYY-MM-DD
-			if len(*p.PublishedAt) >= 10 {
-				name = (*p.PublishedAt)[:10] + "-" + name
-			}
-		} else {
-			name = "draft-" + name
+			name = p.PublishedAt.UTC().Format("2006-01-02") + "-" + p.Slug + ".html"
 		}
 
 		htmlF, err := zw.Create("posts/" + name)
@@ -207,20 +222,13 @@ func (s *Server) handleExportPosts(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Write a simple HTML wrapper
-		htmlContent := `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>` + p.Title + `</title>
-</head>
-<body>
-<h1>` + p.Title + `</h1>
-` + p.HTML + `
-</body>
-</html>`
-
-		if _, err := htmlF.Write([]byte(htmlContent)); err != nil {
+		err = exportPostTemplate.Execute(htmlF, exportPostPage{
+			Lang:  p.BlogLang,
+			Dir:   i18n.Dir(p.BlogLang),
+			Title: out[i].Title,
+			HTML:  template.HTML(out[i].HTML),
+		})
+		if err != nil {
 			s.logger.Error("writing html to zip", "err", err)
 		}
 	}
