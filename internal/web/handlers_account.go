@@ -1,13 +1,8 @@
 package web
 
 import (
-	"archive/zip"
-	"encoding/json"
-	"fmt"
-	"html/template"
-	"io"
 	"net/http"
-	"waldi/internal/i18n"
+	"waldi/internal/storage"
 	"waldi/internal/store"
 )
 
@@ -117,39 +112,9 @@ func (s *Server) renderSettingsDeleteError(w http.ResponseWriter, r *http.Reques
 	s.renderer.RenderStatus(w, http.StatusBadRequest, "blog_settings.html", pd)
 }
 
-type exportPost struct {
-	Title       string  `json:"title"`
-	Slug        string  `json:"slug"`
-	Status      string  `json:"status"`
-	HTML        string  `json:"html"`
-	Doc         any     `json:"doc"`
-	PublishedAt *string `json:"published_at,omitempty"`
-	CreatedAt   string  `json:"created_at"`
-}
-
-type exportPostPage struct {
-	Lang  string
-	Dir   string
-	Title string
-	HTML  template.HTML
-}
-
-var exportPostTemplate = template.Must(template.New("post").Parse(`<!DOCTYPE html>
-<html lang="{{.Lang}}" dir="{{.Dir}}">
-<head>
-<meta charset="utf-8">
-<title>{{.Title}}</title>
-</head>
-<body>
-<h1>{{.Title}}</h1>
-{{.HTML}}
-</body>
-</html>
-`))
-
-// handleExportPosts streams every post a user has written as a zip archive
-// containing a posts.json dump and individual HTML files, so writers can
-// always take their words with them.
+// handleExportPosts streams the user's blog as a zip archive: a posts.json
+// dump plus a self-contained static copy of the blog that opens offline, so
+// writers can always take their words with them.
 func (s *Server) handleExportPosts(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	if user == nil {
@@ -167,70 +132,28 @@ func (s *Server) handleExportPosts(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "export failed", http.StatusInternalServerError)
 		return
 	}
+	pages, err := s.store.PublishedPagesByUsername(r.Context(), user.Username)
+	if err != nil {
+		s.logger.Error("exporting pages", "err", err)
+		http.Error(w, "export failed", http.StatusInternalServerError)
+		return
+	}
+
+	exp := blogExport{
+		renderer:   s.renderer,
+		appBaseURL: appBaseURL(r, s.baseDomain),
+		owner:      *user,
+		posts:      posts,
+		pages:      pages,
+		logger:     s.logger,
+	}
+	if images, ok := s.images.(storage.UploadReader); ok {
+		exp.images = images
+	}
 
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+user.Username+`-export.zip"`)
-	if err := writeExportZip(w, posts); err != nil {
+	if err := exp.write(r.Context(), w); err != nil {
 		s.logger.Error("writing export", "err", err)
 	}
-}
-
-func writeExportZip(w io.Writer, posts []store.Post) error {
-	out := make([]exportPost, 0, len(posts))
-	for _, p := range posts {
-		var doc any
-		if err := json.Unmarshal(p.Doc, &doc); err != nil {
-			doc = nil
-		}
-		var publishedAt *string
-		if p.PublishedAt != nil {
-			formatted := p.PublishedAt.UTC().Format("2006-01-02T15:04:05Z")
-			publishedAt = &formatted
-		}
-		out = append(out, exportPost{
-			Title:       p.Title,
-			Slug:        p.Slug,
-			Status:      p.Status,
-			HTML:        p.HTML,
-			Doc:         doc,
-			PublishedAt: publishedAt,
-			CreatedAt:   p.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
-		})
-	}
-
-	zw := zip.NewWriter(w)
-	jsonF, err := zw.Create("posts.json")
-	if err != nil {
-		return fmt.Errorf("creating posts.json: %w", err)
-	}
-	enc := json.NewEncoder(jsonF)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(out); err != nil {
-		return fmt.Errorf("writing posts.json: %w", err)
-	}
-
-	for _, p := range posts {
-		name := "draft-" + p.Slug + ".html"
-		if p.PublishedAt != nil {
-			name = p.PublishedAt.UTC().Format("2006-01-02") + "-" + p.Slug + ".html"
-		}
-		htmlF, err := zw.Create("posts/" + name)
-		if err != nil {
-			return fmt.Errorf("creating %s: %w", name, err)
-		}
-		err = exportPostTemplate.Execute(htmlF, exportPostPage{
-			Lang:  p.BlogLang,
-			Dir:   i18n.Dir(p.BlogLang),
-			Title: p.Title,
-			HTML:  template.HTML(p.HTML),
-		})
-		if err != nil {
-			return fmt.Errorf("writing %s: %w", name, err)
-		}
-	}
-
-	if err := zw.Close(); err != nil {
-		return fmt.Errorf("closing zip: %w", err)
-	}
-	return nil
 }
