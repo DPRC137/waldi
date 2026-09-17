@@ -170,7 +170,11 @@ func (s *Server) handleExportPosts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="`+user.Username+`-export.zip"`)
 
 	zw := zip.NewWriter(w)
-	defer zw.Close()
+	defer func() {
+		if err := zw.Close(); err != nil {
+			s.logger.Error("closing export zip", "err", err)
+		}
+	}()
 
 	// Write posts.json
 	jsonF, err := zw.Create("posts.json")
@@ -215,7 +219,7 @@ func (s *Server) handleExportPosts(w http.ResponseWriter, r *http.Request) {
 ` + p.HTML + `
 </body>
 </html>`
-		
+
 		if _, err := htmlF.Write([]byte(htmlContent)); err != nil {
 			s.logger.Error("writing html to zip", "err", err)
 		}
