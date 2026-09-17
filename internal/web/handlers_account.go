@@ -3,7 +3,9 @@ package web
 import (
 	"archive/zip"
 	"encoding/json"
+	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"waldi/internal/i18n"
 	"waldi/internal/store"
@@ -166,6 +168,14 @@ func (s *Server) handleExportPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+user.Username+`-export.zip"`)
+	if err := writeExportZip(w, posts); err != nil {
+		s.logger.Error("writing export", "err", err)
+	}
+}
+
+func writeExportZip(w io.Writer, posts []store.Post) error {
 	out := make([]exportPost, 0, len(posts))
 	for _, p := range posts {
 		var doc any
@@ -188,48 +198,39 @@ func (s *Server) handleExportPosts(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+user.Username+`-export.zip"`)
-
 	zw := zip.NewWriter(w)
-	defer func() {
-		if err := zw.Close(); err != nil {
-			s.logger.Error("closing export zip", "err", err)
-		}
-	}()
-
 	jsonF, err := zw.Create("posts.json")
 	if err != nil {
-		s.logger.Error("creating posts.json in zip", "err", err)
-		return
+		return fmt.Errorf("creating posts.json: %w", err)
 	}
 	enc := json.NewEncoder(jsonF)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(out); err != nil {
-		s.logger.Error("writing json to zip", "err", err)
-		return
+		return fmt.Errorf("writing posts.json: %w", err)
 	}
 
-	for i, p := range posts {
+	for _, p := range posts {
 		name := "draft-" + p.Slug + ".html"
 		if p.PublishedAt != nil {
 			name = p.PublishedAt.UTC().Format("2006-01-02") + "-" + p.Slug + ".html"
 		}
-
 		htmlF, err := zw.Create("posts/" + name)
 		if err != nil {
-			s.logger.Error("creating html file in zip", "err", err)
-			continue
+			return fmt.Errorf("creating %s: %w", name, err)
 		}
-
 		err = exportPostTemplate.Execute(htmlF, exportPostPage{
 			Lang:  p.BlogLang,
 			Dir:   i18n.Dir(p.BlogLang),
-			Title: out[i].Title,
-			HTML:  template.HTML(out[i].HTML),
+			Title: p.Title,
+			HTML:  template.HTML(p.HTML),
 		})
 		if err != nil {
-			s.logger.Error("writing html to zip", "err", err)
+			return fmt.Errorf("writing %s: %w", name, err)
 		}
 	}
+
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("closing zip: %w", err)
+	}
+	return nil
 }
